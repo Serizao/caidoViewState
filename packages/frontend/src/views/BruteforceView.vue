@@ -18,7 +18,9 @@ const sdk = useSDK();
 // ViewState data
 const viewStateData = ref('');
 const generator = ref(''); // __VIEWSTATEGENERATOR value
-const appPath = ref('/'); // Application path for modifier calculation
+const appPath = ref('/'); // Application path (from request)
+const targetPagePath = ref('/default.aspx'); // Target page path for SP800-108 derivation
+const iisAppPath = ref('/'); // IIS app path for SP800-108 derivation
 
 // Check for pending data from context menu
 function checkPendingData() {
@@ -28,13 +30,17 @@ function checkPendingData() {
     viewStateData.value = pendingData.viewState;
     generator.value = pendingData.generator;
     appPath.value = pendingData.appPath || '/';
+    // Also set targetPagePath from request path
+    if (pendingData.appPath) {
+      targetPagePath.value = pendingData.appPath;
+    }
     addLog('📥 ViewState data loaded from request');
     addLog(`ViewState: ${pendingData.viewState.substring(0, 50)}...`);
     if (pendingData.generator) {
       addLog(`Generator: ${pendingData.generator}`);
     }
     if (pendingData.appPath) {
-      addLog(`App Path: ${pendingData.appPath}`);
+      addLog(`Page Path: ${pendingData.appPath}`);
     }
   }
 }
@@ -365,7 +371,31 @@ function getBlockSize(algorithm: string): number {
 }
 
 /**
- * Build the modifier bytes from __VIEWSTATEGENERATOR
+ * Get key size for encryption algorithm
+ */
+function getKeySize(algorithm: string): number {
+  switch (algorithm) {
+    case 'AES': return 32; // AES-256
+    case '3DES': return 24;
+    default: return 32;
+  }
+}
+
+/**
+ * Get validation key size for HMAC algorithm
+ */
+function getValidationKeySize(algorithm: string): number {
+  switch (algorithm) {
+    case 'SHA1': return 64;
+    case 'HMACSHA256': return 64;
+    case 'HMACSHA384': return 128;
+    case 'HMACSHA512': return 128;
+    default: return 64;
+  }
+}
+
+/**
+ * Build the modifier bytes from __VIEWSTATEGENERATOR (for legacy non-derived mode)
  */
 function buildModifier(generatorHex: string): Uint8Array {
   if (!generatorHex) return new Uint8Array(0);
@@ -377,6 +407,150 @@ function buildModifier(generatorHex: string): Uint8Array {
   bytes[2] = (value >> 16) & 0xFF;
   bytes[3] = (value >> 24) & 0xFF;
   return bytes;
+}
+
+/**
+ * Encode string with length prefix (BinaryWriter style for .NET)
+ * Uses 7-bit encoded length
+ */
+function encodeLengthPrefixedString(str: string): Uint8Array {
+  const encoder = new TextEncoder();
+  const strBytes = encoder.encode(str);
+  const length = strBytes.length;
+  
+  // 7-bit encoded length
+  const lengthBytes: number[] = [];
+  let remaining = length;
+  do {
+    let byte = remaining & 0x7F;
+    remaining >>= 7;
+    if (remaining > 0) {
+      byte |= 0x80;
+    }
+    lengthBytes.push(byte);
+  } while (remaining > 0);
+  
+  const result = new Uint8Array(lengthBytes.length + strBytes.length);
+  result.set(lengthBytes, 0);
+  result.set(strBytes, lengthBytes.length);
+  return result;
+}
+
+/**
+ * Build Purpose for ViewState decryption
+ * Purpose: WebForms.HiddenFieldPageStatePersister.ClientState
+ * SpecificPurposes: [TemplateSourceDirectory, Type, optionally ViewStateUserKey]
+ */
+function buildViewStatePurpose(targetPagePath: string, iisAppPath: string): { label: Uint8Array; context: Uint8Array } {
+  const primaryPurpose = "WebForms.HiddenFieldPageStatePersister.ClientState";
+  const encoder = new TextEncoder();
+  const label = encoder.encode(primaryPurpose);
+  
+  // Simulate TemplateSourceDirectory
+  let path = targetPagePath;
+  if (!path.startsWith('/')) path = '/' + path;
+  
+  let templateDir = path;
+  const lastDot = templateDir.lastIndexOf('.');
+  const lastSlash = templateDir.lastIndexOf('/');
+  if (lastDot > lastSlash) {
+    templateDir = templateDir.substring(0, lastSlash);
+  }
+  if (templateDir.endsWith('/')) {
+    templateDir = templateDir.substring(0, templateDir.length - 1);
+  }
+  if (!templateDir) templateDir = '/';
+  
+  // Simulate GetTypeName
+  let typeName = path;
+  if (!typeName.toLowerCase().endsWith('.aspx')) {
+    typeName += '/default.aspx';
+  }
+  let appPath = iisAppPath.toLowerCase();
+  if (!appPath.startsWith('/')) appPath = '/' + appPath;
+  if (!appPath.endsWith('/')) appPath += '/';
+  
+  const idx = typeName.toLowerCase().indexOf(appPath);
+  if (idx >= 0) {
+    typeName = typeName.substring(idx + appPath.length);
+  }
+  if (typeName.startsWith('/')) {
+    typeName = typeName.substring(1);
+  }
+  typeName = typeName.replace(/\./g, '_').replace(/\//g, '_');
+  
+  // Build context with length-prefixed strings
+  const specific1 = "TemplateSourceDirectory: " + templateDir.toUpperCase();
+  const specific2 = "Type: " + typeName.toUpperCase();
+  
+  const encoded1 = encodeLengthPrefixedString(specific1);
+  const encoded2 = encodeLengthPrefixedString(specific2);
+  
+  const context = new Uint8Array(encoded1.length + encoded2.length);
+  context.set(encoded1, 0);
+  context.set(encoded2, encoded1.length);
+  
+  return { label, context };
+}
+
+/**
+ * SP800-108 Key Derivation Function using HMACSHA512
+ * Based on Microsoft's implementation
+ */
+async function deriveKeySP800_108(
+  masterKey: Uint8Array,
+  label: Uint8Array,
+  context: Uint8Array,
+  keyLengthBits: number
+): Promise<Uint8Array> {
+  // Create buffer: [i]_2 || label || 0x00 || context || [L]_2
+  const bufferLength = 4 + label.length + 1 + context.length + 4;
+  const buffer = new Uint8Array(bufferLength);
+  
+  // Copy label at offset 4
+  buffer.set(label, 4);
+  // 0x00 is already there (default)
+  // Copy context at offset 5 + label.length
+  buffer.set(context, 5 + label.length);
+  // Write L (key length in bits) as big-endian at the end
+  const lOffset = 5 + label.length + context.length;
+  buffer[lOffset] = (keyLengthBits >> 24) & 0xFF;
+  buffer[lOffset + 1] = (keyLengthBits >> 16) & 0xFF;
+  buffer[lOffset + 2] = (keyLengthBits >> 8) & 0xFF;
+  buffer[lOffset + 3] = keyLengthBits & 0xFF;
+  
+  // Import master key for HMAC-SHA512
+  const hmacKey = await crypto.subtle.importKey(
+    'raw',
+    masterKey,
+    { name: 'HMAC', hash: 'SHA-512' },
+    false,
+    ['sign']
+  );
+  
+  const keyLengthBytes = keyLengthBits / 8;
+  const output = new Uint8Array(keyLengthBytes);
+  let numBytesWritten = 0;
+  let i = 1;
+  
+  while (numBytesWritten < keyLengthBytes) {
+    // Write i as big-endian at offset 0
+    buffer[0] = (i >> 24) & 0xFF;
+    buffer[1] = (i >> 16) & 0xFF;
+    buffer[2] = (i >> 8) & 0xFF;
+    buffer[3] = i & 0xFF;
+    
+    // Compute K_i = HMAC-SHA512(masterKey, buffer)
+    const k_i = new Uint8Array(await crypto.subtle.sign('HMAC', hmacKey, buffer));
+    
+    // Copy to output
+    const bytesToCopy = Math.min(keyLengthBytes - numBytesWritten, k_i.length);
+    output.set(k_i.slice(0, bytesToCopy), numBytesWritten);
+    numBytesWritten += bytesToCopy;
+    i++;
+  }
+  
+  return output;
 }
 
 /**
@@ -402,13 +576,22 @@ async function computeHMAC(data: Uint8Array, key: Uint8Array, algorithm: string)
  */
 async function decryptAES(encryptedData: Uint8Array, keyBytes: Uint8Array, iv: Uint8Array): Promise<Uint8Array | null> {
   try {
-    // Ensure key is proper length (128, 192, or 256 bits)
-    let keyLength = 16; // Default to AES-128
-    if (keyBytes.length >= 32) keyLength = 32;
-    else if (keyBytes.length >= 24) keyLength = 24;
-    else if (keyBytes.length >= 16) keyLength = 16;
+    // Use the full key as provided (128, 192, or 256 bits)
+    // Web Crypto API will validate the key length
+    let key = keyBytes;
     
-    const key = keyBytes.slice(0, keyLength);
+    // Adjust key length if needed to valid AES key sizes
+    if (keyBytes.length > 32) {
+      key = keyBytes.slice(0, 32); // AES-256
+    } else if (keyBytes.length > 24 && keyBytes.length < 32) {
+      key = keyBytes.slice(0, 24); // AES-192
+    } else if (keyBytes.length > 16 && keyBytes.length < 24) {
+      key = keyBytes.slice(0, 16); // AES-128
+    }
+    
+    console.log('[ViewState] AES key length:', key.length, 'bytes (', key.length * 8, 'bits)');
+    console.log('[ViewState] IV length:', iv.length, 'bytes');
+    console.log('[ViewState] Encrypted data length:', encryptedData.length, 'bytes');
     
     const cryptoKey = await crypto.subtle.importKey(
       'raw',
@@ -424,23 +607,61 @@ async function decryptAES(encryptedData: Uint8Array, keyBytes: Uint8Array, iv: U
       encryptedData
     );
     
+    console.log('[ViewState] Decryption successful, length:', decrypted.byteLength);
     return new Uint8Array(decrypted);
   } catch (error) {
+    console.log('[ViewState] AES decryption error:', error);
     return null;
   }
 }
 
 /**
  * Check if decrypted data looks like valid ViewState
+ * ViewState format starts with specific magic bytes
  */
 function isValidViewState(data: Uint8Array): boolean {
-  if (data.length < 2) return false;
+  if (data.length < 4) return false;
   
-  if (data[0] === 0xFF && data[1] === 0x01) return true;
-  if (data[0] === 0x1F && data[1] === 0x8B) return true;
+  // ViewState 2.0 format: starts with 0xFF 0x01
+  if (data[0] === 0xFF && data[1] === 0x01) {
+    console.log('[ViewState] Found ViewState 2.0 magic bytes');
+    return true;
+  }
   
-  const validFirstBytes = [0x02, 0x03, 0x05, 0x06, 0x09, 0x0A, 0x0B, 0x0F, 0x10, 0x14, 0x15, 0x16, 0x18, 0x19, 0x1E, 0x1F, 0x64, 0x65, 0x66, 0x67];
-  if (validFirstBytes.includes(data[0])) return true;
+  // GZip compressed: starts with 0x1F 0x8B
+  if (data[0] === 0x1F && data[1] === 0x8B) {
+    console.log('[ViewState] Found GZip compressed data');
+    return true;
+  }
+  
+  // ViewState 1.0/1.1 format checks
+  // The first byte indicates the type, followed by specific patterns
+  // Type 0x02 = Pair, typically followed by more type bytes
+  if (data[0] === 0x02) {
+    // A Pair should have valid child types
+    if (data.length >= 3) {
+      const validTypes = [0x02, 0x05, 0x09, 0x0F, 0x10, 0x14, 0x15, 0x16, 0x18, 0x19, 0x1E, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69];
+      if (validTypes.includes(data[1]) || validTypes.includes(data[2])) {
+        console.log('[ViewState] Found Pair structure');
+        return true;
+      }
+    }
+  }
+  
+  // Triplet (0x03) structure
+  if (data[0] === 0x03 && data.length >= 4) {
+    console.log('[ViewState] Found Triplet structure');
+    return true;
+  }
+  
+  // ArrayList (0x16) or other collection types
+  if ((data[0] === 0x16 || data[0] === 0x15 || data[0] === 0x17) && data.length >= 4) {
+    console.log('[ViewState] Found Collection structure');
+    return true;
+  }
+  
+  console.log('[ViewState] Data does not match known ViewState patterns. First 4 bytes:', 
+    Array.from(data.slice(0, 4)).map(b => b.toString(16).padStart(2, '0')).join(' '));
   
   return false;
 }
@@ -488,51 +709,145 @@ async function tryDecryptViewState(
   generatorHex: string,
   encAlgorithm: string,
   valAlgorithm: string,
-  checkMac: boolean
+  checkMac: boolean,
+  targetPagePath: string = '/',
+  iisAppPath: string = '/'
 ): Promise<{ success: boolean; decrypted?: Uint8Array }> {
   try {
-    let viewStateBytes = base64ToBytes(viewStateBase64);
+    const viewStateBytes = base64ToBytes(viewStateBase64);
     const blockSize = getBlockSize(encAlgorithm);
+    const hashSize = getHashSize(valAlgorithm);
     
-    if (checkMac) {
-      const hashSize = getHashSize(valAlgorithm);
-      if (viewStateBytes.length <= hashSize + blockSize) {
-        return { success: false };
-      }
-      
-      const macValid = await verifyViewStateMAC(
-        viewStateBase64,
-        validationKeyHex,
-        generatorHex,
-        valAlgorithm
-      );
-      
-      if (!macValid) {
-        return { success: false };
-      }
-      
-      viewStateBytes = viewStateBytes.slice(0, viewStateBytes.length - hashSize);
-    }
+    // For encrypted ViewState in ASP.NET 4.5+:
+    // Format: IV (16 bytes) || Encrypted || HMAC
     
-    if (viewStateBytes.length < blockSize * 2) {
+    // Need at least IV + some data + HMAC
+    if (viewStateBytes.length <= blockSize + hashSize) {
       return { success: false };
     }
     
-    const iv = viewStateBytes.slice(0, blockSize);
-    const encryptedData = viewStateBytes.slice(blockSize);
+    const masterDecryptionKey = hexToBytes(decryptionKeyHex);
+    const masterValidationKey = hexToBytes(validationKeyHex);
     
-    const decryptionKey = hexToBytes(decryptionKeyHex);
+    // Calculate sizes
+    const ivLength = blockSize;
+    const signatureLength = hashSize;
+    const encryptedPayloadLength = viewStateBytes.length - ivLength - signatureLength;
     
-    if (encAlgorithm === 'AES') {
-      const decrypted = await decryptAES(encryptedData, decryptionKey, iv);
+    if (encryptedPayloadLength <= 0) {
+      return { success: false };
+    }
+    
+    // Extract parts
+    const iv = viewStateBytes.slice(0, ivLength);
+    const encryptedPayload = viewStateBytes.slice(ivLength, ivLength + encryptedPayloadLength);
+    const signature = viewStateBytes.slice(ivLength + encryptedPayloadLength);
+    
+    // Data to verify signature on
+    const dataToSign = viewStateBytes.slice(0, ivLength + encryptedPayloadLength);
+    
+    // Try multiple approaches in order:
+    // 1. SP800-108 derived keys (ASP.NET 4.5+)
+    // 2. Master keys directly (older ASP.NET)
+    
+    // Build purpose for key derivation
+    const purpose = buildViewStatePurpose(targetPagePath, iisAppPath);
+    
+    // Derive keys using SP800-108
+    // Use the actual key lengths from the provided keys, not fixed values
+    const encKeySize = masterDecryptionKey.length * 8; // in bits (e.g., 24 bytes = 192 bits for AES-192)
+    const valKeySize = masterValidationKey.length * 8; // in bits
+    
+    console.log('[ViewState] Key sizes - Enc:', encKeySize, 'bits, Val:', valKeySize, 'bits');
+    
+    const derivedEncKey = await deriveKeySP800_108(masterDecryptionKey, purpose.label, purpose.context, encKeySize);
+    const derivedValKey = await deriveKeySP800_108(masterValidationKey, purpose.label, purpose.context, valKeySize);
+    
+    console.log('[ViewState] Derived enc key (first 8 bytes):', bytesToHex(derivedEncKey.slice(0, 8)));
+    console.log('[ViewState] Derived val key (first 8 bytes):', bytesToHex(derivedValKey.slice(0, 8)));
+    
+    // Debug: show signature info
+    console.log('[ViewState] Expected signature (first 8 bytes):', bytesToHex(signature.slice(0, 8)));
+    console.log('[ViewState] Data to sign length:', dataToSign.length);
+    console.log('[ViewState] Validation key (first 16 bytes):', validationKeyHex.substring(0, 32));
+    
+    // Approach 1: Try with SP800-108 derived keys
+    const computedSignatureDerived = await computeHMAC(dataToSign, derivedValKey, valAlgorithm);
+    console.log('[ViewState] Computed (derived) (first 8 bytes):', bytesToHex(computedSignatureDerived.slice(0, 8)));
+    
+    if (arraysEqual(signature, computedSignatureDerived)) {
+      console.log('[ViewState] ✅ MAC verified with derived key (SP800-108)');
+      console.log('[ViewState] Master decryption key:', decryptionKeyHex);
+      console.log('[ViewState] Derived enc key length:', derivedEncKey.length, 'bytes');
+      console.log('[ViewState] Derived enc key:', bytesToHex(derivedEncKey));
+      console.log('[ViewState] IV:', bytesToHex(iv));
+      console.log('[ViewState] Encrypted payload length:', encryptedPayload.length, 'bytes');
+      console.log('[ViewState] Encrypted payload (first 32 bytes):', bytesToHex(encryptedPayload.slice(0, 32)));
       
-      if (decrypted && isValidViewState(decrypted)) {
-        return { success: true, decrypted };
+      if (encAlgorithm === 'AES') {
+        console.log('[ViewState] Starting AES decryption...');
+        try {
+          const decrypted = await decryptAES(encryptedPayload, derivedEncKey, iv);
+          console.log('[ViewState] Decryption result:', decrypted ? `success (${decrypted.length} bytes)` : 'null/failed');
+          if (decrypted) {
+            console.log('[ViewState] Decrypted data (first 32 bytes):', bytesToHex(decrypted.slice(0, 32)));
+            console.log('[ViewState] 🎉 Returning success with decrypted data');
+            return { success: true, decrypted };
+          } else {
+            console.log('[ViewState] Decryption returned null - but MAC was valid, returning success without decrypted data');
+            return { success: true };
+          }
+        } catch (decryptError) {
+          console.error('[ViewState] ❌ Decryption exception:', decryptError);
+          // MAC was valid, so key is correct even if decryption failed
+          console.log('[ViewState] MAC was valid, returning success without decrypted data');
+          return { success: true };
+        }
+      } else {
+        console.log('[ViewState] Non-AES algorithm, returning success based on MAC only');
+        return { success: true };
       }
     }
     
+    // Approach 2: Try with master keys directly (legacy mode - no key derivation)
+    const computedSignatureMaster = await computeHMAC(dataToSign, masterValidationKey, valAlgorithm);
+    console.log('[ViewState] Computed (master) (first 8 bytes):', bytesToHex(computedSignatureMaster.slice(0, 8)));
+    
+    if (arraysEqual(signature, computedSignatureMaster)) {
+      console.log('[ViewState] ✅ MAC verified with master key (legacy mode)');
+      if (encAlgorithm === 'AES') {
+        const decrypted = await decryptAES(encryptedPayload, masterDecryptionKey, iv);
+        if (decrypted) {
+          console.log('[ViewState] Decryption successful with master key');
+          if (isValidViewState(decrypted)) {
+            return { success: true, decrypted };
+          } else {
+            console.log('[ViewState] Decrypted data failed ViewState validation');
+          }
+        }
+      }
+    }
+    
+    // Approach 3: Try without any key derivation, signature on encrypted data only (some implementations)
+    // Some older implementations sign only the encrypted payload, not IV+encrypted
+    const computedSignaturePayloadOnly = await computeHMAC(encryptedPayload, masterValidationKey, valAlgorithm);
+    if (arraysEqual(signature, computedSignaturePayloadOnly)) {
+      console.log('[ViewState] ✅ MAC verified on payload only (legacy variant)');
+      if (encAlgorithm === 'AES') {
+        const decrypted = await decryptAES(encryptedPayload, masterDecryptionKey, iv);
+        if (decrypted) {
+          if (isValidViewState(decrypted)) {
+            return { success: true, decrypted };
+          }
+        }
+      }
+    }
+    
+    // MAC didn't match with any approach
+    console.log('[ViewState] ❌ MAC did not match with any key/approach');
     return { success: false };
   } catch (error) {
+    console.error('Decrypt error:', error);
     return { success: false };
   }
 }
@@ -544,7 +859,9 @@ async function verifyKey(
   generatorHex: string,
   encAlgorithm: string,
   valAlgorithm: string,
-  verifyMode: 'validate' | 'decrypt' | 'both'
+  verifyMode: 'validate' | 'decrypt' | 'both',
+  targetPagePath: string = '/',
+  iisAppPath: string = '/'
 ): Promise<{ success: boolean; decrypted?: Uint8Array }> {
   
   switch (verifyMode) {
@@ -558,6 +875,9 @@ async function verifyKey(
       return { success: macValid };
       
     case 'decrypt':
+      // For encrypted ViewState, we MUST verify the MAC first
+      // Otherwise we'll get false positives
+      // The format is: IV || Enc(data) || HMAC(IV || Enc(data))
       return await tryDecryptViewState(
         viewStateBase64,
         decryptionKeyHex,
@@ -565,7 +885,9 @@ async function verifyKey(
         generatorHex,
         encAlgorithm,
         valAlgorithm,
-        false
+        true, // Always verify MAC for encrypted ViewState
+        targetPagePath,
+        iisAppPath
       );
       
     case 'both':
@@ -576,7 +898,9 @@ async function verifyKey(
         generatorHex,
         encAlgorithm,
         valAlgorithm,
-        true
+        true,
+        targetPagePath,
+        iisAppPath
       );
       
     default:
@@ -597,6 +921,46 @@ const canStart = computed(() => {
 const progress = computed(() => {
   if (totalKeys.value === 0) return 0;
   return Math.round((testedKeys.value / totalKeys.value) * 100);
+});
+
+// Convert decrypted hex data to Base64
+const decryptedDataBase64 = computed(() => {
+  if (!decryptedData.value) return '';
+  try {
+    const hex = decryptedData.value;
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < hex.length; i += 2) {
+      bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+    }
+    return btoa(String.fromCharCode(...bytes));
+  } catch {
+    return 'Error converting to Base64';
+  }
+});
+
+// Convert decrypted hex data to ASCII (printable chars only)
+const decryptedDataAscii = computed(() => {
+  if (!decryptedData.value) return '';
+  try {
+    const hex = decryptedData.value;
+    let result = '';
+    for (let i = 0; i < hex.length; i += 2) {
+      const byte = parseInt(hex.substring(i, i + 2), 16);
+      // Show printable ASCII chars, replace others with dots
+      if (byte >= 32 && byte <= 126) {
+        result += String.fromCharCode(byte);
+      } else if (byte === 10) {
+        result += '\n';
+      } else if (byte === 13) {
+        result += '';
+      } else {
+        result += '.';
+      }
+    }
+    return result;
+  } catch {
+    return 'Error converting to ASCII';
+  }
 });
 
 const keySourceOptions = [
@@ -684,7 +1048,9 @@ async function startBruteforce() {
         generator.value.trim(),
         decryptionAlg.value,
         validationAlg.value,
-        mode.value
+        mode.value,
+        targetPagePath.value.trim() || '/',
+        iisAppPath.value.trim() || '/'
       );
       
       if (result.success) {
@@ -726,6 +1092,8 @@ function clear() {
   viewStateData.value = '';
   generator.value = '';
   appPath.value = '/';
+  targetPagePath.value = '/default.aspx';
+  iisAppPath.value = '/';
   validationKey.value = '';
   decryptionKey.value = '';
   foundKey.value = null;
@@ -766,86 +1134,103 @@ onMounted(() => {
 
 <template>
   <div class="p-4 flex flex-col gap-4">
-    <!-- ViewState Input -->
-    <Card>
-      <template #title>
-        <span class="text-sm font-semibold">ViewState Data</span>
-      </template>
-      <template #content>
-        <div class="flex flex-col gap-4">
-          <div>
-            <label class="block text-sm text-surface-400 mb-2">ViewState (Base64 encoded)</label>
-            <Textarea
-              v-model="viewStateData"
-              rows="3"
-              class="w-full font-mono text-sm"
-              placeholder="Paste the __VIEWSTATE value here..."
-            />
-          </div>
-
-          <div class="grid grid-cols-2 gap-4">
+    <!-- ViewState Input & Algorithm Configuration - Side by Side -->
+    <div class="grid grid-cols-2 gap-4">
+      <!-- ViewState Input -->
+      <Card>
+        <template #title>
+          <span class="text-sm font-semibold">ViewState Data</span>
+        </template>
+        <template #content>
+          <div class="flex flex-col gap-3">
             <div>
-              <label class="block text-sm text-surface-400 mb-2">__VIEWSTATEGENERATOR (for MAC validation)</label>
-              <InputText
-                v-model="generator"
-                class="w-full font-mono text-sm"
-                placeholder="e.g., CA0B0334"
+              <label class="block text-sm text-surface-400 mb-1">ViewState (Base64)</label>
+              <Textarea
+                v-model="viewStateData"
+                rows="2"
+                class="w-full font-mono text-xs"
+                placeholder="Paste the __VIEWSTATE value here..."
               />
             </div>
+
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="block text-xs text-surface-400 mb-1">__VIEWSTATEGENERATOR</label>
+                <InputText
+                  v-model="generator"
+                  class="w-full font-mono text-xs"
+                  placeholder="CA0B0334"
+                />
+              </div>
+              <div>
+                <label class="block text-xs text-surface-400 mb-1">Target Page Path</label>
+                <InputText
+                  v-model="targetPagePath"
+                  class="w-full font-mono text-xs"
+                  placeholder="/Content/default.aspx"
+                />
+              </div>
+            </div>
+            
             <div>
-              <label class="block text-sm text-surface-400 mb-2">Application Path</label>
+              <label class="block text-xs text-surface-400 mb-1">IIS App Path</label>
               <InputText
-                v-model="appPath"
-                class="w-full font-mono text-sm"
-                placeholder="e.g., /myapp/page.aspx"
+                v-model="iisAppPath"
+                class="w-full font-mono text-xs"
+                placeholder="/"
               />
             </div>
           </div>
-        </div>
-      </template>
-    </Card>
+        </template>
+      </Card>
 
-    <!-- Algorithm Configuration -->
-    <Card>
-      <template #title>
-        <span class="text-sm font-semibold">Algorithm Configuration</span>
-      </template>
-      <template #content>
-        <div class="grid grid-cols-3 gap-4">
-          <div>
-            <label class="block text-sm text-surface-400 mb-2">Mode</label>
-            <Select
-              v-model="mode"
-              :options="modes"
-              optionLabel="label"
-              optionValue="value"
-              class="w-full"
-            />
+      <!-- Algorithm Configuration -->
+      <Card>
+        <template #title>
+          <span class="text-sm font-semibold">Algorithm Configuration</span>
+        </template>
+        <template #content>
+          <div class="flex flex-col gap-3">
+            <div>
+              <label class="block text-xs text-surface-400 mb-1">Mode</label>
+              <Select
+                v-model="mode"
+                :options="modes"
+                optionLabel="label"
+                optionValue="value"
+                class="w-full"
+              />
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="block text-xs text-surface-400 mb-1">Validation Algorithm</label>
+                <Select
+                  v-model="validationAlg"
+                  :options="validationAlgorithms"
+                  optionLabel="label"
+                  optionValue="value"
+                  class="w-full"
+                />
+              </div>
+              <div>
+                <label class="block text-xs text-surface-400 mb-1">Decryption Algorithm</label>
+                <Select
+                  v-model="decryptionAlg"
+                  :options="decryptionAlgorithms"
+                  optionLabel="label"
+                  optionValue="value"
+                  class="w-full"
+                  :disabled="mode === 'validate'"
+                />
+              </div>
+            </div>
+            <div class="text-xs text-surface-500 mt-2">
+              💡 ASP.NET 4.5+ uses SP800-108 key derivation based on page path
+            </div>
           </div>
-          <div>
-            <label class="block text-sm text-surface-400 mb-2">Validation Algorithm</label>
-            <Select
-              v-model="validationAlg"
-              :options="validationAlgorithms"
-              optionLabel="label"
-              optionValue="value"
-              class="w-full"
-            />
-          </div>
-          <div>
-            <label class="block text-sm text-surface-400 mb-2">Decryption Algorithm</label>
-            <Select
-              v-model="decryptionAlg"
-              :options="decryptionAlgorithms"
-              optionLabel="label"
-              optionValue="value"
-              class="w-full"
-              :disabled="mode === 'validate'"
-            />
-          </div>
-        </div>
-      </template>
-    </Card>
+        </template>
+      </Card>
+    </div>
 
     <!-- Key Configuration -->
     <Card>
@@ -1018,7 +1403,7 @@ CB2721ABDAF8E9DC516D621D8B8BF13A2C9E8689A25303BF,21F090935F6E49C2
     <!-- Result: Key Found -->
     <div v-if="foundKey" class="p-4 bg-green-500/20 border border-green-500 rounded-md">
       <h3 class="text-lg font-semibold text-green-400 mb-3">🎉 Machine Key Found!</h3>
-      <div class="space-y-2">
+      <div class="grid grid-cols-2 gap-4">
         <div>
           <span class="text-sm text-surface-400">Validation Key:</span>
           <code class="block p-2 mt-1 bg-surface-900 rounded text-green-400 font-mono text-xs break-all">{{ foundKey.validation }}</code>
@@ -1027,11 +1412,33 @@ CB2721ABDAF8E9DC516D621D8B8BF13A2C9E8689A25303BF,21F090935F6E49C2
           <span class="text-sm text-surface-400">Decryption Key:</span>
           <code class="block p-2 mt-1 bg-surface-900 rounded text-green-400 font-mono text-xs break-all">{{ foundKey.decryption }}</code>
         </div>
-        <div v-if="decryptedData">
-          <span class="text-sm text-surface-400">Decrypted Data (hex):</span>
-          <code class="block p-2 mt-1 bg-surface-900 rounded text-blue-400 font-mono text-xs break-all max-h-32 overflow-auto">{{ decryptedData }}</code>
+      </div>
+      
+      <!-- Decrypted Data Section -->
+      <div v-if="decryptedData" class="mt-4 p-3 bg-surface-800 rounded-md border border-blue-500/50">
+        <h4 class="text-sm font-semibold text-blue-400 mb-2">🔓 Decrypted ViewState Data</h4>
+        
+        <div class="space-y-3">
+          <!-- Hex dump -->
+          <details open>
+            <summary class="cursor-pointer text-xs text-surface-400 hover:text-surface-200">Raw Hex Data</summary>
+            <code class="block p-2 mt-1 bg-surface-900 rounded text-blue-300 font-mono text-xs break-all max-h-40 overflow-auto">{{ decryptedData }}</code>
+          </details>
+          
+          <!-- Base64 -->
+          <details>
+            <summary class="cursor-pointer text-xs text-surface-400 hover:text-surface-200">Base64</summary>
+            <code class="block p-2 mt-1 bg-surface-900 rounded text-purple-300 font-mono text-xs break-all max-h-40 overflow-auto">{{ decryptedDataBase64 }}</code>
+          </details>
+          
+          <!-- ASCII preview -->
+          <details>
+            <summary class="cursor-pointer text-xs text-surface-400 hover:text-surface-200">ASCII Preview (printable chars)</summary>
+            <code class="block p-2 mt-1 bg-surface-900 rounded text-yellow-300 font-mono text-xs break-all max-h-40 overflow-auto whitespace-pre-wrap">{{ decryptedDataAscii }}</code>
+          </details>
         </div>
       </div>
+      
       <Button :label="copied ? 'Copied!' : 'Copy Keys'" size="small" class="mt-3" @click="copyKey" />
     </div>
 
