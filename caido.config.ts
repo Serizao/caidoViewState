@@ -10,7 +10,7 @@ export default defineConfig({
   id: "viewstate-analyzer",
   name: "ViewState Analyzer",
   description: "Analyze ASP.NET ViewState to detect encryption and MAC signature",
-  version: "0.0.1",
+  version: "1.0.0",
   author: {
     name: "Serizao",
     email: "dev@caido.io",

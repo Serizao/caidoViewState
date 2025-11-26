@@ -7,7 +7,7 @@
       <div class="grid grid-cols-2 gap-4 mb-4">
         <div class="status-item">
           <span class="label text-gray-400">Encrypted:</span>
-          <span :class="result.encrypted ? 'text-red-400 font-semibold' : 'text-green-400 font-semibold'">
+          <span :class="result.encrypted ? 'text-green-400 font-semibold' : 'text-red-400 font-semibold'">
             {{ result.encrypted ? 'YES' : 'NO' }}
           </span>
         </div>

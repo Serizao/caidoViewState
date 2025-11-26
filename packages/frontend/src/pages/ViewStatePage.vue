@@ -246,13 +246,13 @@ function copyBfKey() {
           <h3 class="text-md font-semibold text-white mb-3">Analysis Results</h3>
           <div class="grid grid-cols-2 gap-4 mb-4">
             <div>
-              <span class="text-gray-400">Encrypted:</span>
-              <span :class="parseResult.encrypted ? 'text-red-400' : 'text-green-400'" class="ml-2 font-semibold">
+              <span class="text-gray-400">Encrypted: </span>
+              <span :class="parseResult.encrypted ? 'text-green-400' : 'text-red-400'" class="ml-2 font-semibold">
                 {{ parseResult.encrypted ? 'YES' : 'NO' }}
               </span>
             </div>
             <div>
-              <span class="text-gray-400">Signed (MAC):</span>
+              <span class="text-gray-400">Signed (MAC): </span>
               <span :class="parseResult.mac ? 'text-green-400' : 'text-red-400'" class="ml-2 font-semibold">
                 {{ parseResult.mac ? 'YES' : 'NO' }}
               </span>
