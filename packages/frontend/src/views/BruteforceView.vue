@@ -10,7 +10,7 @@ import Panel from 'primevue/panel';
 import AutoComplete from 'primevue/autocomplete';
 import FileUpload from 'primevue/fileupload';
 import { useSDK } from '../plugins/sdk';
-import { getPendingViewStateData } from '../stores/viewstate-store';
+import { getPendingViewStateData, pendingData, pendingDataVersion } from '../stores/viewstate-store';
 
 // SDK
 const sdk = useSDK();
@@ -24,26 +24,45 @@ const iisAppPath = ref('/'); // IIS app path for SP800-108 derivation
 
 // Check for pending data from context menu
 function checkPendingData() {
-  const pendingData = getPendingViewStateData();
-  if (pendingData) {
-    console.log('[ViewState Bruteforce] Loading pending data:', pendingData);
-    viewStateData.value = pendingData.viewState;
-    generator.value = pendingData.generator;
-    appPath.value = pendingData.appPath || '/';
+  const data = getPendingViewStateData();
+  if (data) {
+    console.log('[ViewState Bruteforce] Loading pending data:', data);
+    
+    // Clear previous results
+    foundKey.value = null;
+    decryptedData.value = null;
+    testedKeys.value = 0;
+    totalKeys.value = 0;
+    finished.value = false;
+    
+    // Set new data
+    viewStateData.value = data.viewState;
+    generator.value = data.generator;
+    appPath.value = data.appPath || '/';
+    
     // Also set targetPagePath from request path
-    if (pendingData.appPath) {
-      targetPagePath.value = pendingData.appPath;
+    if (data.appPath) {
+      targetPagePath.value = data.appPath;
     }
+    
+    // Clear and update logs
+    logs.value = [];
     addLog('📥 ViewState data loaded from request');
-    addLog(`ViewState: ${pendingData.viewState.substring(0, 50)}...`);
-    if (pendingData.generator) {
-      addLog(`Generator: ${pendingData.generator}`);
+    addLog(`ViewState: ${data.viewState.substring(0, 50)}...`);
+    if (data.generator) {
+      addLog(`Generator: ${data.generator}`);
     }
-    if (pendingData.appPath) {
-      addLog(`Page Path: ${pendingData.appPath}`);
+    if (data.appPath) {
+      addLog(`Page Path: ${data.appPath}`);
     }
   }
 }
+
+// Watch for new pending data (when user sends from context menu while already on page)
+watch(pendingDataVersion, () => {
+  console.log('[ViewState Bruteforce] Pending data version changed, checking for new data...');
+  checkPendingData();
+});
 
 // Key configuration
 const keySource = ref<'manual' | 'wordlist' | 'file' | 'caido'>('wordlist');

@@ -1,4 +1,4 @@
-import { ref } from 'vue';
+import { ref, watch } from 'vue';
 
 // Store for passing ViewState data between components
 export interface ViewStateData {
@@ -7,12 +7,16 @@ export interface ViewStateData {
   appPath: string;
 }
 
-// Reactive store
-const pendingData = ref<ViewStateData | null>(null);
+// Reactive store - exported for watching
+export const pendingData = ref<ViewStateData | null>(null);
+
+// Counter to trigger reactivity even with same data
+export const pendingDataVersion = ref(0);
 
 export function setPendingViewStateData(data: ViewStateData) {
   pendingData.value = data;
-  console.log('[ViewState Store] Data set:', data);
+  pendingDataVersion.value++; // Increment to trigger watchers
+  console.log('[ViewState Store] Data set (version ' + pendingDataVersion.value + '):', data);
 }
 
 export function getPendingViewStateData(): ViewStateData | null {
@@ -25,4 +29,3 @@ export function getPendingViewStateData(): ViewStateData | null {
 export function hasPendingData(): boolean {
   return pendingData.value !== null;
 }
-
