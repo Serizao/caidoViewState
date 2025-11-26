@@ -1,0 +1,20 @@
+{
+  "id": "viewstate-analyzer",
+  "name": "ViewState Analyzer",
+  "version": "0.0.1",
+  "description": "Analyze ASP.NET ViewState to detect encryption and MAC signature",
+  "author": {
+    "name": "Serizao",
+    "email": "dev@caido.io",
+    "url": "https://github.com/serizao/caidoViewState"
+  },
+  "links": {},
+  "plugins": [
+    {
+      "id": "frontend",
+      "kind": "frontend",
+      "name": "frontend",
+      "entrypoint": "frontend/index.js"
+    }
+  ]
+}
