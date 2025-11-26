@@ -1,14 +1,20 @@
+import { Classic } from "@caido/primevue";
+import PrimeVue from "primevue/config";
+import { createApp } from "vue";
+
 import type { Caido } from "@caido/sdk-frontend";
+import { SDKPlugin } from "./plugins/sdk";
 import ViewStateAnalyzer from "./ViewStateAnalyzer.vue";
+import App from "./views/App.vue";
+
+// Plugin constants
+const PLUGIN_ID = "viewstate-decoder";
+const PLUGIN_NAME = "ViewState Decoder";
 
 /**
- * ViewState Analyzer Plugin
- * Adds a custom view mode to analyze ASP.NET ViewState
+ * Register the ViewState view mode in all request contexts
  */
-export function init(caido: Caido) {
-  console.log("[ViewState Plugin] Initializing...");
-
-  // Register custom request view mode in multiple contexts
+function registerViewModes(sdk: Caido) {
   const viewModeOptions = {
     label: "ViewState",
     view: {
@@ -16,61 +22,83 @@ export function init(caido: Caido) {
     },
   };
 
-  // Add view mode to all relevant contexts
-  console.log("[ViewState Plugin] Registering view modes...");
+  const contexts = [
+    { name: "httpHistory", register: () => sdk.httpHistory.addRequestViewMode(viewModeOptions) },
+    { name: "replay", register: () => sdk.replay.addRequestViewMode(viewModeOptions) },
+    { name: "search", register: () => sdk.search.addRequestViewMode(viewModeOptions) },
+    { name: "sitemap", register: () => sdk.sitemap.addRequestViewMode(viewModeOptions) },
+    { name: "automate", register: () => sdk.automate.addRequestViewMode(viewModeOptions) },
+    { name: "findings", register: () => sdk.findings.addRequestViewMode(viewModeOptions) },
+    { name: "intercept", register: () => sdk.intercept.addRequestViewMode(viewModeOptions) },
+  ];
 
-  try {
-    caido.httpHistory.addRequestViewMode(viewModeOptions);
-    console.log("[ViewState Plugin] Registered in httpHistory");
-  } catch (e) {
-    console.error("[ViewState Plugin] Failed to register in httpHistory:", e);
+  for (const context of contexts) {
+    try {
+      context.register();
+      console.log(`[ViewState Plugin] Registered in ${context.name}`);
+    } catch (e) {
+      console.error(`[ViewState Plugin] Failed to register in ${context.name}:`, e);
+    }
   }
+}
 
-  try {
-    caido.replay.addRequestViewMode(viewModeOptions);
-    console.log("[ViewState Plugin] Registered in replay");
-  } catch (e) {
-    console.error("[ViewState Plugin] Failed to register in replay:", e);
-  }
+/**
+ * Initialize the plugin
+ */
+export function init(sdk: Caido) {
+  console.log("[ViewState Plugin] Initializing...");
 
-  try {
-    caido.search.addRequestViewMode(viewModeOptions);
-    console.log("[ViewState Plugin] Registered in search");
-  } catch (e) {
-    console.error("[ViewState Plugin] Failed to register in search:", e);
-  }
+  // Create Vue app
+  const app = createApp(App);
 
-  try {
-    caido.sitemap.addRequestViewMode(viewModeOptions);
-    console.log("[ViewState Plugin] Registered in sitemap");
-  } catch (e) {
-    console.error("[ViewState Plugin] Failed to register in sitemap:", e);
-  }
+  // Use PrimeVue with Caido theme
+  app.use(PrimeVue, {
+    unstyled: true,
+    pt: Classic,
+  });
 
-  try {
-    caido.automate.addRequestViewMode(viewModeOptions);
-    console.log("[ViewState Plugin] Registered in automate");
-  } catch (e) {
-    console.error("[ViewState Plugin] Failed to register in automate:", e);
-  }
+  // Use SDK plugin
+  app.use(SDKPlugin, sdk);
 
-  try {
-    caido.findings.addRequestViewMode(viewModeOptions);
-    console.log("[ViewState Plugin] Registered in findings");
-  } catch (e) {
-    console.error("[ViewState Plugin] Failed to register in findings:", e);
-  }
+  // Create root element
+  const root = document.createElement("div");
+  Object.assign(root.style, {
+    height: "100%",
+    width: "100%",
+  });
+  root.id = "plugin--viewstate-decoder";
 
-  try {
-    caido.intercept.addRequestViewMode(viewModeOptions);
-    console.log("[ViewState Plugin] Registered in intercept");
-  } catch (e) {
-    console.error("[ViewState Plugin] Failed to register in intercept:", e);
-  }
+  // Mount app
+  app.mount(root);
+
+  // Register page
+  sdk.navigation.addPage("/viewstate", {
+    body: root,
+  });
+
+  // Register sidebar item
+  sdk.sidebar.registerItem(PLUGIN_NAME, "/viewstate", {
+    icon: "fas fa-key",
+  });
+
+  console.log("[ViewState Plugin] Page registered");
+
+  // Register view modes
+  registerViewModes(sdk);
+
+  // Register command
+  sdk.commands.register(`${PLUGIN_ID}.open`, {
+    name: "Open ViewState Decoder",
+    run: () => {
+      sdk.navigation.goTo("/viewstate");
+    },
+  });
+
+  sdk.commandPalette.register(`${PLUGIN_ID}.open`);
 
   console.log("[ViewState Plugin] Initialization complete");
 
-  caido.window.showToast("ViewState Analyzer plugin loaded", {
+  sdk.window.showToast("ViewState Decoder plugin loaded", {
     variant: "success",
     duration: 3000,
   });

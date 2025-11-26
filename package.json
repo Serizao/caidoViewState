@@ -24,6 +24,8 @@
   },
   "packageManager": "pnpm@10.13.1",
   "dependencies": {
-    "pako": "^2.1.0"
+    "@caido/primevue": "^0.2.0",
+    "pako": "^2.1.0",
+    "primevue": "^4.2.0"
   }
 }
