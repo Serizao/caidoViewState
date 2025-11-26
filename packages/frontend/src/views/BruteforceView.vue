@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, onMounted, watch, nextTick } from 'vue';
 import Button from 'primevue/button';
 import Textarea from 'primevue/textarea';
 import InputText from 'primevue/inputtext';
@@ -699,8 +699,11 @@ async function startBruteforce() {
       addLog(`⚠️ Error testing key: ${error}`);
     }
     
-    if (i % 10 === 0) {
-      await new Promise(resolve => setTimeout(resolve, 1));
+    // Let the UI update every iteration
+    await nextTick();
+    // Small delay to prevent browser freezing
+    if (i % 5 === 0) {
+      await new Promise(resolve => setTimeout(resolve, 0));
     }
   }
 
@@ -989,13 +992,26 @@ CB2721ABDAF8E9DC516D621D8B8BF13A2C9E8689A25303BF,21F090935F6E49C2
     </div>
 
     <!-- Progress -->
-    <Card v-if="isRunning || testedKeys > 0">
+    <Card v-if="isRunning || (finished && testedKeys > 0)">
       <template #content>
         <div class="flex justify-between text-sm text-surface-400 mb-2">
           <span>Progress: {{ testedKeys }} / {{ totalKeys }} keys</span>
           <span>{{ progress }}%</span>
         </div>
-        <ProgressBar :value="progress" :showValue="false" />
+        <ProgressBar 
+          :value="progress" 
+          :showValue="false"
+          :class="{ 'animate-pulse': isRunning }"
+        />
+        <div v-if="isRunning" class="text-center text-xs text-surface-500 mt-2">
+          ⏳ Running...
+        </div>
+        <div v-else-if="finished && !foundKey" class="text-center text-xs text-red-400 mt-2">
+          ❌ Completed - No key found
+        </div>
+        <div v-else-if="finished && foundKey" class="text-center text-xs text-green-400 mt-2">
+          ✅ Completed - Key found!
+        </div>
       </template>
     </Card>
 
