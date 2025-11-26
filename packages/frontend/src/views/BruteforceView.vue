@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import Button from 'primevue/button';
 import Textarea from 'primevue/textarea';
 import InputText from 'primevue/inputtext';
@@ -7,17 +7,55 @@ import Card from 'primevue/card';
 import Select from 'primevue/select';
 import ProgressBar from 'primevue/progressbar';
 import Panel from 'primevue/panel';
+import AutoComplete from 'primevue/autocomplete';
+import FileUpload from 'primevue/fileupload';
+import { useSDK } from '../plugins/sdk';
+import { getPendingViewStateData } from '../stores/viewstate-store';
+
+// SDK
+const sdk = useSDK();
 
 // ViewState data
 const viewStateData = ref('');
 const generator = ref(''); // __VIEWSTATEGENERATOR value
 const appPath = ref('/'); // Application path for modifier calculation
 
+// Check for pending data from context menu
+function checkPendingData() {
+  const pendingData = getPendingViewStateData();
+  if (pendingData) {
+    console.log('[ViewState Bruteforce] Loading pending data:', pendingData);
+    viewStateData.value = pendingData.viewState;
+    generator.value = pendingData.generator;
+    appPath.value = pendingData.appPath || '/';
+    addLog('📥 ViewState data loaded from request');
+    addLog(`ViewState: ${pendingData.viewState.substring(0, 50)}...`);
+    if (pendingData.generator) {
+      addLog(`Generator: ${pendingData.generator}`);
+    }
+    if (pendingData.appPath) {
+      addLog(`App Path: ${pendingData.appPath}`);
+    }
+  }
+}
+
 // Key configuration
-const keySource = ref<'manual' | 'wordlist'>('wordlist');
+const keySource = ref<'manual' | 'wordlist' | 'file' | 'caido'>('wordlist');
 const validationKey = ref('');
 const decryptionKey = ref('');
 const keyWordlist = ref('');
+
+// Caido hosted files
+interface HostedFile {
+  id: string;
+  name: string;
+  size: number;
+}
+const hostedFiles = ref<HostedFile[]>([]);
+const filteredFiles = ref<HostedFile[]>([]);
+const selectedFile = ref<HostedFile | null>(null);
+const loadingFiles = ref(false);
+const loadingFileContent = ref(false);
 
 // Algorithm options (like Blacklist3r)
 const validationAlgorithms = [
@@ -66,6 +104,182 @@ C551753B0325187D1759B4FB055B44F7C5077B016C02AF674E8DE69351B69FEFD045A267308AA2DA
 
 # Add your own keys below (one per line)
 # validationKey,decryptionKey`;
+
+// ============ Caido Files API (via Backend) ============
+
+async function loadHostedFiles() {
+  loadingFiles.value = true;
+  addLog('🔄 Loading hosted files from Caido...');
+  try {
+    // Use frontend SDK directly (sdk.files is a frontend API)
+    console.log('[ViewState] Calling sdk.files.getAll()...');
+    // @ts-ignore - SDK types may not be complete
+    const files = await sdk.files.getAll();
+    console.log('[ViewState] Files from SDK:', files);
+    
+    if (!files || !Array.isArray(files)) {
+      addLog('⚠️ No files returned');
+      hostedFiles.value = [];
+      filteredFiles.value = [];
+      return;
+    }
+    
+    // Map files - the SDK returns HostedFile objects with getters
+    hostedFiles.value = files.map((f: any) => {
+      console.log('[ViewState] Raw file object:', f);
+      console.log('[ViewState] File object keys:', Object.keys(f));
+      
+      // Try to get ID - it might be a complex object
+      let rawId = typeof f.getId === 'function' ? f.getId() : (f.id || f.ID || '');
+      console.log('[ViewState] Raw ID:', rawId, 'Type:', typeof rawId);
+      
+      // If ID is an object, try to extract the actual ID string
+      let id: string;
+      if (typeof rawId === 'object' && rawId !== null) {
+        // Try common patterns
+        id = rawId.value || rawId.id || rawId.ID || rawId.toString() || JSON.stringify(rawId);
+      } else {
+        id = String(rawId);
+      }
+      
+      const name = typeof f.getName === 'function' ? f.getName() : (f.name || f.Name || '');
+      const size = typeof f.getSize === 'function' ? f.getSize() : (f.size || f.Size || 0);
+      
+      console.log('[ViewState] Mapped file:', { id, name, size, idType: typeof id });
+      return { id, name, size };
+    });
+    
+    // Initialize filtered files with all files
+    filteredFiles.value = [...hostedFiles.value];
+    addLog(`📁 Loaded ${hostedFiles.value.length} hosted files from Caido`);
+    
+    if (hostedFiles.value.length === 0) {
+      addLog('ℹ️ No hosted files found. Upload files in Caido Settings > Files');
+    }
+  } catch (error) {
+    console.error('[ViewState] Error loading hosted files:', error);
+    addLog('⚠️ Could not load hosted files: ' + String(error));
+  } finally {
+    loadingFiles.value = false;
+  }
+}
+
+async function loadFileContent(fileId: string, fileName: string) {
+  if (!fileId) {
+    addLog('⚠️ No file ID provided');
+    return;
+  }
+  
+  const id = String(fileId);
+  console.log('[ViewState] Loading file content for ID:', id);
+  
+  loadingFileContent.value = true;
+  try {
+    // Get the file from SDK frontend
+    // @ts-ignore
+    const files = await sdk.files.getAll();
+    const file = files.find((f: any) => {
+      const fid = f.id || (typeof f.getId === 'function' ? f.getId() : '');
+      return fid === id;
+    });
+    
+    if (!file) {
+      throw new Error(`File not found: ${id}`);
+    }
+    
+    console.log('[ViewState] Found file:', file);
+    
+    // Try to get content using different methods
+    let content: string = '';
+    
+    // Method 1: getContent() method
+    if (typeof file.getContent === 'function') {
+      const rawContent = await file.getContent();
+      if (rawContent instanceof Uint8Array) {
+        content = new TextDecoder().decode(rawContent);
+      } else {
+        content = String(rawContent || '');
+      }
+    }
+    // Method 2: content property
+    else if (file.content) {
+      if (file.content instanceof Uint8Array) {
+        content = new TextDecoder().decode(file.content);
+      } else {
+        content = String(file.content);
+      }
+    }
+    // Method 3: read() method
+    else if (typeof file.read === 'function') {
+      const rawContent = await file.read();
+      content = String(rawContent || '');
+    }
+    // Method 4: Use backend to read file by path
+    else if (file.path) {
+      console.log('[ViewState] Using backend to read from path:', file.path);
+      content = await sdk.backend.readFileByPath(file.path);
+    }
+    // Method 5: Try backend with ID
+    else {
+      console.log('[ViewState] Trying backend with ID');
+      content = await sdk.backend.getHostedFileContent(id);
+    }
+    
+    if (!content) {
+      throw new Error('Could not read file content');
+    }
+    
+    keyWordlist.value = content;
+    addLog(`📄 Loaded file: ${fileName} (${content.split('\n').length} lines)`);
+  } catch (error) {
+    console.error('[ViewState] Error loading file content:', error);
+    addLog('⚠️ Could not load file content: ' + String(error));
+  } finally {
+    loadingFileContent.value = false;
+  }
+}
+
+function searchFiles(event: { query: string }) {
+  const query = event.query.toLowerCase();
+  if (!query) {
+    filteredFiles.value = [...hostedFiles.value];
+  } else {
+    filteredFiles.value = hostedFiles.value.filter(f => 
+      f.name.toLowerCase().includes(query)
+    );
+  }
+}
+
+// Handle file selection from AutoComplete
+function onFileSelect(event: { value: HostedFile }) {
+  const file = event.value;
+  console.log('[ViewState] File selected:', file);
+  console.log('[ViewState] File ID:', file?.id, 'Type:', typeof file?.id);
+  
+  if (file && file.id) {
+    // Ensure we pass string ID
+    const fileId = String(file.id);
+    const fileName = String(file.name || 'Unknown');
+    loadFileContent(fileId, fileName);
+  } else {
+    addLog('⚠️ Invalid file selected');
+  }
+}
+
+// Handle local file upload
+function handleLocalFile(event: Event) {
+  const input = event.target as HTMLInputElement;
+  if (input.files && input.files[0]) {
+    const file = input.files[0];
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const content = e.target?.result as string;
+      keyWordlist.value = content;
+      addLog(`📄 Loaded local file: ${file.name} (${file.size} bytes)`);
+    };
+    reader.readAsText(file);
+  }
+}
 
 // ============ Crypto Helper Functions ============
 
@@ -218,22 +432,13 @@ async function decryptAES(encryptedData: Uint8Array, keyBytes: Uint8Array, iv: U
 
 /**
  * Check if decrypted data looks like valid ViewState
- * Valid ViewState starts with magic bytes
  */
 function isValidViewState(data: Uint8Array): boolean {
   if (data.length < 2) return false;
   
-  // ASP.NET ViewState typically starts with:
-  // 0xFF 0x01 - ViewState version 2 (ASP.NET 2.0+)
-  // 0x1F 0x8B - GZIP compressed
-  // Other valid patterns
+  if (data[0] === 0xFF && data[1] === 0x01) return true;
+  if (data[0] === 0x1F && data[1] === 0x8B) return true;
   
-  // Check for common ViewState markers
-  if (data[0] === 0xFF && data[1] === 0x01) return true; // Uncompressed ViewState 2.0
-  if (data[0] === 0x1F && data[1] === 0x8B) return true; // GZIP compressed
-  
-  // Check for valid serialization markers
-  // 0x02 = Type_Array, 0x03 = Type_ArrayList, 0x05 = Type_Boolean, etc.
   const validFirstBytes = [0x02, 0x03, 0x05, 0x06, 0x09, 0x0A, 0x0B, 0x0F, 0x10, 0x14, 0x15, 0x16, 0x18, 0x19, 0x1E, 0x1F, 0x64, 0x65, 0x66, 0x67];
   if (validFirstBytes.includes(data[0])) return true;
   
@@ -242,9 +447,6 @@ function isValidViewState(data: Uint8Array): boolean {
 
 // ============ Verification Functions ============
 
-/**
- * Verify ViewState MAC signature
- */
 async function verifyViewStateMAC(
   viewStateBase64: string,
   validationKeyHex: string,
@@ -279,12 +481,6 @@ async function verifyViewStateMAC(
   }
 }
 
-/**
- * Try to decrypt ViewState
- * ASP.NET encrypted ViewState structure:
- * - For AES: IV (16 bytes) + EncryptedData
- * - If signed: IV + EncryptedData + MAC
- */
 async function tryDecryptViewState(
   viewStateBase64: string,
   decryptionKeyHex: string,
@@ -298,14 +494,12 @@ async function tryDecryptViewState(
     let viewStateBytes = base64ToBytes(viewStateBase64);
     const blockSize = getBlockSize(encAlgorithm);
     
-    // If checking MAC, first verify and remove it
     if (checkMac) {
       const hashSize = getHashSize(valAlgorithm);
       if (viewStateBytes.length <= hashSize + blockSize) {
         return { success: false };
       }
       
-      // Verify MAC first
       const macValid = await verifyViewStateMAC(
         viewStateBase64,
         validationKeyHex,
@@ -317,20 +511,16 @@ async function tryDecryptViewState(
         return { success: false };
       }
       
-      // Remove MAC
       viewStateBytes = viewStateBytes.slice(0, viewStateBytes.length - hashSize);
     }
     
-    // Need at least IV + one block
     if (viewStateBytes.length < blockSize * 2) {
       return { success: false };
     }
     
-    // Extract IV (first block)
     const iv = viewStateBytes.slice(0, blockSize);
     const encryptedData = viewStateBytes.slice(blockSize);
     
-    // Try decryption
     const decryptionKey = hexToBytes(decryptionKeyHex);
     
     if (encAlgorithm === 'AES') {
@@ -347,9 +537,6 @@ async function tryDecryptViewState(
   }
 }
 
-/**
- * Main verification function that handles all modes
- */
 async function verifyKey(
   viewStateBase64: string,
   validationKeyHex: string,
@@ -378,7 +565,7 @@ async function verifyKey(
         generatorHex,
         encAlgorithm,
         valAlgorithm,
-        false // Don't check MAC
+        false
       );
       
     case 'both':
@@ -389,7 +576,7 @@ async function verifyKey(
         generatorHex,
         encAlgorithm,
         valAlgorithm,
-        true // Check MAC first
+        true
       );
       
     default:
@@ -411,6 +598,13 @@ const progress = computed(() => {
   if (totalKeys.value === 0) return 0;
   return Math.round((testedKeys.value / totalKeys.value) * 100);
 });
+
+const keySourceOptions = [
+  { label: 'Manual Entry', value: 'manual' },
+  { label: 'Text Wordlist', value: 'wordlist' },
+  { label: 'Local File', value: 'file' },
+  { label: 'Caido Hosted File', value: 'caido' },
+];
 
 function addLog(message: string) {
   const timestamp = new Date().toLocaleTimeString();
@@ -560,6 +754,10 @@ function copyLogs() {
 
 onMounted(() => {
   keyWordlist.value = knownKeys;
+  loadHostedFiles();
+  
+  // Check for pending data from context menu
+  checkPendingData();
 });
 </script>
 
@@ -651,14 +849,14 @@ onMounted(() => {
       <template #title>
         <div class="flex items-center justify-between">
           <span class="text-sm font-semibold">Machine Keys</span>
-          <div class="flex gap-2">
-            <Button
-              :label="keySource === 'wordlist' ? 'Wordlist' : 'Manual'"
-              size="small"
-              :severity="keySource === 'wordlist' ? 'primary' : 'secondary'"
-              @click="keySource = keySource === 'wordlist' ? 'manual' : 'wordlist'"
-            />
-          </div>
+          <Select
+            v-model="keySource"
+            :options="keySourceOptions"
+            optionLabel="label"
+            optionValue="value"
+            class="w-48"
+            size="small"
+          />
         </div>
       </template>
       <template #content>
@@ -682,8 +880,8 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- Wordlist Mode -->
-        <div v-else class="flex flex-col gap-3">
+        <!-- Text Wordlist Mode -->
+        <div v-else-if="keySource === 'wordlist'" class="flex flex-col gap-3">
           <div class="flex items-center justify-between">
             <label class="text-sm text-surface-400">Key Wordlist (validationKey,decryptionKey per line)</label>
             <Button label="Load Blacklist3r Keys" size="small" text @click="loadDefaultKeys" />
@@ -698,6 +896,80 @@ CB2721ABDAF8E9DC516D621D8B8BF13A2C9E8689A25303BF,21F090935F6E49C2
           />
           <p class="text-xs text-surface-500">
             Lines starting with # are comments. Use comma to separate validation and decryption keys.
+          </p>
+        </div>
+
+        <!-- Local File Mode -->
+        <div v-else-if="keySource === 'file'" class="flex flex-col gap-3">
+          <div>
+            <label class="block text-sm text-surface-400 mb-2">Upload Local Wordlist File</label>
+            <input 
+              type="file" 
+              accept=".txt,.csv,.list"
+              @change="handleLocalFile"
+              class="block w-full text-sm text-surface-400
+                file:mr-4 file:py-2 file:px-4
+                file:rounded file:border-0
+                file:text-sm file:font-semibold
+                file:bg-surface-700 file:text-surface-200
+                hover:file:bg-surface-600
+                cursor-pointer"
+            />
+          </div>
+          <Textarea
+            v-model="keyWordlist"
+            rows="6"
+            class="w-full font-mono text-xs"
+            placeholder="File content will appear here..."
+            readonly
+          />
+          <p class="text-xs text-surface-500">
+            {{ keyWordlist ? `Loaded ${keyWordlist.split('\n').length} lines` : 'No file loaded' }}
+          </p>
+        </div>
+
+        <!-- Caido Hosted File Mode -->
+        <div v-else-if="keySource === 'caido'" class="flex flex-col gap-3">
+          <div>
+            <label class="block text-sm text-surface-400 mb-2">Select Caido Hosted File</label>
+            <div class="flex gap-2">
+              <AutoComplete
+                v-model="selectedFile"
+                :suggestions="filteredFiles"
+                @complete="searchFiles"
+                @item-select="onFileSelect"
+                optionLabel="name"
+                placeholder="Search for a file..."
+                class="flex-1"
+                :loading="loadingFiles || loadingFileContent"
+                dropdown
+              >
+                <template #option="{ option }">
+                  <div class="flex items-center justify-between w-full">
+                    <span>{{ option.name }}</span>
+                    <span class="text-xs text-surface-500">{{ (option.size / 1024).toFixed(1) }} KB</span>
+                  </div>
+                </template>
+              </AutoComplete>
+              <Button 
+                icon="fas fa-sync" 
+                severity="secondary" 
+                @click="loadHostedFiles" 
+                :loading="loadingFiles"
+                v-tooltip="'Refresh file list'"
+              />
+            </div>
+          </div>
+          <Textarea
+            v-model="keyWordlist"
+            rows="6"
+            class="w-full font-mono text-xs"
+            placeholder="File content will appear here..."
+            readonly
+          />
+          <p class="text-xs text-surface-500">
+            {{ hostedFiles.length }} hosted files available. 
+            {{ keyWordlist ? `Loaded ${keyWordlist.split('\n').length} lines` : 'Select a file to load' }}
           </p>
         </div>
       </template>

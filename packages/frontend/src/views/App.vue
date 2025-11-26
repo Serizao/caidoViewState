@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted, watch } from 'vue';
 import Button from 'primevue/button';
 import MenuBar from 'primevue/menubar';
-import Textarea from 'primevue/textarea';
-import Select from 'primevue/select';
 
 import ParseView from './ParseView.vue';
 import BruteforceView from './BruteforceView.vue';
+import { hasPendingData } from '../stores/viewstate-store';
 
 const page = ref<'Parse' | 'Bruteforce'>('Parse');
 
@@ -42,6 +41,28 @@ const handleLabel = (label: string | ((...args: unknown[]) => string) | undefine
   }
   return label;
 };
+
+// Check for pending data on mount and switch to Bruteforce tab
+onMounted(() => {
+  if (hasPendingData()) {
+    console.log('[ViewState App] Pending data detected, switching to Bruteforce tab');
+    page.value = 'Bruteforce';
+  }
+});
+
+// Also check periodically (in case navigation happens after mount)
+const checkInterval = setInterval(() => {
+  if (hasPendingData() && page.value !== 'Bruteforce') {
+    console.log('[ViewState App] Pending data detected, switching to Bruteforce tab');
+    page.value = 'Bruteforce';
+  }
+}, 100);
+
+// Clean up interval on unmount
+import { onUnmounted } from 'vue';
+onUnmounted(() => {
+  clearInterval(checkInterval);
+});
 </script>
 
 <template>
