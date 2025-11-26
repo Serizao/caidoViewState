@@ -6,9 +6,7 @@ import InputText from 'primevue/inputtext';
 import Card from 'primevue/card';
 import Select from 'primevue/select';
 import ProgressBar from 'primevue/progressbar';
-import Checkbox from 'primevue/checkbox';
 import Panel from 'primevue/panel';
-import Divider from 'primevue/divider';
 
 // ViewState data
 const viewStateData = ref('');
@@ -33,7 +31,6 @@ const validationAlgorithms = [
 const decryptionAlgorithms = [
   { label: 'AES (Default)', value: 'AES' },
   { label: '3DES', value: '3DES' },
-  { label: 'DES', value: 'DES' },
 ];
 
 const validationAlg = ref('SHA1');
@@ -44,13 +41,14 @@ const mode = ref<'validate' | 'decrypt' | 'both'>('validate');
 const modes = [
   { label: 'Validate MAC Only', value: 'validate' },
   { label: 'Decrypt Only', value: 'decrypt' },
-  { label: 'Both', value: 'both' },
+  { label: 'Both (Decrypt + Validate)', value: 'both' },
 ];
 
 // Bruteforce state
 const isRunning = ref(false);
 const finished = ref(false);
 const foundKey = ref<{ validation: string; decryption: string } | null>(null);
+const decryptedData = ref<string | null>(null);
 const testedKeys = ref(0);
 const totalKeys = ref(0);
 const copied = ref(false);
@@ -61,15 +59,346 @@ const knownKeys = `# Common ASP.NET Machine Keys (from Blacklist3r)
 # Format: validationKey,decryptionKey
 
 # Default keys from various sources
-CB2721ABDAF8E9DC516D621D8B8BF13A2C9E8689A25303BF,21F090935F6E49C2
-3DES Default:ABDAF8E9DC516D621D8B8BF13A2C9E8689A25303BF,CB2721ABDAF8E9DC516D621D8B8BF13A2C9E8689A25303BF
+CB2721ABDAF8E9DC516D621D8B8BF13A2C9E8689A25303BF,21F090935F6E49C2C8B0A1E9F7D6C5B4A3029180F7E6D5C4B3A20190F8E7D6C5
 AE2BE9E0F1D29C5A5E7A65D7B8F7E3F9D1C2B4A6E8F0D2C4B6A8E0F2D4C6B8A0,F1D29C5A5E7A65D7B8F7E3F9D1C2B4A6E8F0D2C4B6A8E0F2D4C6B8A0E2F4D6C8
 B3C2D1E0F9A8B7C6D5E4F3A2B1C0D9E8F7A6B5C4D3E2F1A0B9C8D7E6F5A4B3C2,E0F9A8B7C6D5E4F3A2B1C0D9E8F7A6B5C4D3E2F1A0B9C8D7E6F5A4B3C2D1E0F9
+C551753B0325187D1759B4FB055B44F7C5077B016C02AF674E8DE69351B69FEFD045A267308AA2DAB81B69919402D7886A6E986473EEEC9556A9003357F5ED45,F6722806843145965513817CEBDECBB1F94808E4A6C0B2F2
 
 # Add your own keys below (one per line)
 # validationKey,decryptionKey`;
 
-// Computed
+// ============ Crypto Helper Functions ============
+
+/**
+ * Convert hex string to Uint8Array
+ */
+function hexToBytes(hex: string): Uint8Array {
+  const cleanHex = hex.replace(/\s/g, '');
+  const bytes = new Uint8Array(cleanHex.length / 2);
+  for (let i = 0; i < cleanHex.length; i += 2) {
+    bytes[i / 2] = parseInt(cleanHex.substring(i, i + 2), 16);
+  }
+  return bytes;
+}
+
+/**
+ * Convert Uint8Array to hex string
+ */
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Convert base64 to Uint8Array
+ */
+function base64ToBytes(base64: string): Uint8Array {
+  const normalizedBase64 = base64.replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/');
+  const binaryString = atob(normalizedBase64);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/**
+ * Compare two Uint8Arrays
+ */
+function arraysEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * Get hash size for algorithm
+ */
+function getHashSize(algorithm: string): number {
+  switch (algorithm) {
+    case 'SHA1': return 20;
+    case 'HMACSHA256': return 32;
+    case 'HMACSHA384': return 48;
+    case 'HMACSHA512': return 64;
+    case 'MD5': return 16;
+    default: return 20;
+  }
+}
+
+/**
+ * Get Web Crypto algorithm name for HMAC
+ */
+function getWebCryptoAlgorithm(algorithm: string): string {
+  switch (algorithm) {
+    case 'SHA1': return 'SHA-1';
+    case 'HMACSHA256': return 'SHA-256';
+    case 'HMACSHA384': return 'SHA-384';
+    case 'HMACSHA512': return 'SHA-512';
+    default: return 'SHA-1';
+  }
+}
+
+/**
+ * Get block size for encryption algorithm
+ */
+function getBlockSize(algorithm: string): number {
+  switch (algorithm) {
+    case 'AES': return 16;
+    case '3DES': return 8;
+    default: return 16;
+  }
+}
+
+/**
+ * Build the modifier bytes from __VIEWSTATEGENERATOR
+ */
+function buildModifier(generatorHex: string): Uint8Array {
+  if (!generatorHex) return new Uint8Array(0);
+  
+  const value = parseInt(generatorHex, 16);
+  const bytes = new Uint8Array(4);
+  bytes[0] = value & 0xFF;
+  bytes[1] = (value >> 8) & 0xFF;
+  bytes[2] = (value >> 16) & 0xFF;
+  bytes[3] = (value >> 24) & 0xFF;
+  return bytes;
+}
+
+/**
+ * Compute HMAC using Web Crypto API
+ */
+async function computeHMAC(data: Uint8Array, key: Uint8Array, algorithm: string): Promise<Uint8Array> {
+  const cryptoAlgorithm = getWebCryptoAlgorithm(algorithm);
+  
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    key,
+    { name: 'HMAC', hash: cryptoAlgorithm },
+    false,
+    ['sign']
+  );
+  
+  const signature = await crypto.subtle.sign('HMAC', cryptoKey, data);
+  return new Uint8Array(signature);
+}
+
+/**
+ * Decrypt data using AES-CBC
+ */
+async function decryptAES(encryptedData: Uint8Array, keyBytes: Uint8Array, iv: Uint8Array): Promise<Uint8Array | null> {
+  try {
+    // Ensure key is proper length (128, 192, or 256 bits)
+    let keyLength = 16; // Default to AES-128
+    if (keyBytes.length >= 32) keyLength = 32;
+    else if (keyBytes.length >= 24) keyLength = 24;
+    else if (keyBytes.length >= 16) keyLength = 16;
+    
+    const key = keyBytes.slice(0, keyLength);
+    
+    const cryptoKey = await crypto.subtle.importKey(
+      'raw',
+      key,
+      { name: 'AES-CBC' },
+      false,
+      ['decrypt']
+    );
+    
+    const decrypted = await crypto.subtle.decrypt(
+      { name: 'AES-CBC', iv },
+      cryptoKey,
+      encryptedData
+    );
+    
+    return new Uint8Array(decrypted);
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * Check if decrypted data looks like valid ViewState
+ * Valid ViewState starts with magic bytes
+ */
+function isValidViewState(data: Uint8Array): boolean {
+  if (data.length < 2) return false;
+  
+  // ASP.NET ViewState typically starts with:
+  // 0xFF 0x01 - ViewState version 2 (ASP.NET 2.0+)
+  // 0x1F 0x8B - GZIP compressed
+  // Other valid patterns
+  
+  // Check for common ViewState markers
+  if (data[0] === 0xFF && data[1] === 0x01) return true; // Uncompressed ViewState 2.0
+  if (data[0] === 0x1F && data[1] === 0x8B) return true; // GZIP compressed
+  
+  // Check for valid serialization markers
+  // 0x02 = Type_Array, 0x03 = Type_ArrayList, 0x05 = Type_Boolean, etc.
+  const validFirstBytes = [0x02, 0x03, 0x05, 0x06, 0x09, 0x0A, 0x0B, 0x0F, 0x10, 0x14, 0x15, 0x16, 0x18, 0x19, 0x1E, 0x1F, 0x64, 0x65, 0x66, 0x67];
+  if (validFirstBytes.includes(data[0])) return true;
+  
+  return false;
+}
+
+// ============ Verification Functions ============
+
+/**
+ * Verify ViewState MAC signature
+ */
+async function verifyViewStateMAC(
+  viewStateBase64: string,
+  validationKeyHex: string,
+  generatorHex: string,
+  algorithm: string
+): Promise<boolean> {
+  try {
+    const viewStateBytes = base64ToBytes(viewStateBase64);
+    const hashSize = getHashSize(algorithm);
+    
+    if (viewStateBytes.length <= hashSize) {
+      return false;
+    }
+    
+    const dataLength = viewStateBytes.length - hashSize;
+    const data = viewStateBytes.slice(0, dataLength);
+    const mac = viewStateBytes.slice(dataLength);
+    
+    const modifier = buildModifier(generatorHex);
+    
+    const dataWithModifier = new Uint8Array(data.length + modifier.length);
+    dataWithModifier.set(data, 0);
+    dataWithModifier.set(modifier, data.length);
+    
+    const validationKey = hexToBytes(validationKeyHex);
+    const computedMac = await computeHMAC(dataWithModifier, validationKey, algorithm);
+    
+    return arraysEqual(mac, computedMac);
+  } catch (error) {
+    console.error('Error verifying ViewState MAC:', error);
+    return false;
+  }
+}
+
+/**
+ * Try to decrypt ViewState
+ * ASP.NET encrypted ViewState structure:
+ * - For AES: IV (16 bytes) + EncryptedData
+ * - If signed: IV + EncryptedData + MAC
+ */
+async function tryDecryptViewState(
+  viewStateBase64: string,
+  decryptionKeyHex: string,
+  validationKeyHex: string,
+  generatorHex: string,
+  encAlgorithm: string,
+  valAlgorithm: string,
+  checkMac: boolean
+): Promise<{ success: boolean; decrypted?: Uint8Array }> {
+  try {
+    let viewStateBytes = base64ToBytes(viewStateBase64);
+    const blockSize = getBlockSize(encAlgorithm);
+    
+    // If checking MAC, first verify and remove it
+    if (checkMac) {
+      const hashSize = getHashSize(valAlgorithm);
+      if (viewStateBytes.length <= hashSize + blockSize) {
+        return { success: false };
+      }
+      
+      // Verify MAC first
+      const macValid = await verifyViewStateMAC(
+        viewStateBase64,
+        validationKeyHex,
+        generatorHex,
+        valAlgorithm
+      );
+      
+      if (!macValid) {
+        return { success: false };
+      }
+      
+      // Remove MAC
+      viewStateBytes = viewStateBytes.slice(0, viewStateBytes.length - hashSize);
+    }
+    
+    // Need at least IV + one block
+    if (viewStateBytes.length < blockSize * 2) {
+      return { success: false };
+    }
+    
+    // Extract IV (first block)
+    const iv = viewStateBytes.slice(0, blockSize);
+    const encryptedData = viewStateBytes.slice(blockSize);
+    
+    // Try decryption
+    const decryptionKey = hexToBytes(decryptionKeyHex);
+    
+    if (encAlgorithm === 'AES') {
+      const decrypted = await decryptAES(encryptedData, decryptionKey, iv);
+      
+      if (decrypted && isValidViewState(decrypted)) {
+        return { success: true, decrypted };
+      }
+    }
+    
+    return { success: false };
+  } catch (error) {
+    return { success: false };
+  }
+}
+
+/**
+ * Main verification function that handles all modes
+ */
+async function verifyKey(
+  viewStateBase64: string,
+  validationKeyHex: string,
+  decryptionKeyHex: string,
+  generatorHex: string,
+  encAlgorithm: string,
+  valAlgorithm: string,
+  verifyMode: 'validate' | 'decrypt' | 'both'
+): Promise<{ success: boolean; decrypted?: Uint8Array }> {
+  
+  switch (verifyMode) {
+    case 'validate':
+      const macValid = await verifyViewStateMAC(
+        viewStateBase64,
+        validationKeyHex,
+        generatorHex,
+        valAlgorithm
+      );
+      return { success: macValid };
+      
+    case 'decrypt':
+      return await tryDecryptViewState(
+        viewStateBase64,
+        decryptionKeyHex,
+        validationKeyHex,
+        generatorHex,
+        encAlgorithm,
+        valAlgorithm,
+        false // Don't check MAC
+      );
+      
+    case 'both':
+      return await tryDecryptViewState(
+        viewStateBase64,
+        decryptionKeyHex,
+        validationKeyHex,
+        generatorHex,
+        encAlgorithm,
+        valAlgorithm,
+        true // Check MAC first
+      );
+      
+    default:
+      return { success: false };
+  }
+}
+
+// ============ Component Logic ============
+
 const canStart = computed(() => {
   const hasViewState = viewStateData.value.trim().length > 0;
   const hasKeys = keySource.value === 'manual' 
@@ -83,7 +412,6 @@ const progress = computed(() => {
   return Math.round((testedKeys.value / totalKeys.value) * 100);
 });
 
-// Functions
 function addLog(message: string) {
   const timestamp = new Date().toLocaleTimeString();
   logs.value.unshift(`[${timestamp}] ${message}`);
@@ -101,7 +429,6 @@ function parseKeyLine(line: string): { validation: string; decryption: string } 
       decryption: parts[1].trim(),
     };
   } else if (parts.length === 1) {
-    // Single key - use for both
     return {
       validation: parts[0].trim(),
       decryption: parts[0].trim(),
@@ -114,6 +441,7 @@ async function startBruteforce() {
   isRunning.value = true;
   finished.value = false;
   foundKey.value = null;
+  decryptedData.value = null;
   testedKeys.value = 0;
   logs.value = [];
 
@@ -121,6 +449,9 @@ async function startBruteforce() {
   addLog(`Mode: ${mode.value}`);
   addLog(`Validation Algorithm: ${validationAlg.value}`);
   addLog(`Decryption Algorithm: ${decryptionAlg.value}`);
+  if (generator.value) {
+    addLog(`Generator (__VIEWSTATEGENERATOR): ${generator.value}`);
+  }
 
   let keysToTest: { validation: string; decryption: string }[] = [];
 
@@ -149,19 +480,34 @@ async function startBruteforce() {
     const key = keysToTest[i];
     testedKeys.value = i + 1;
 
-    // TODO: Implement actual HMAC/decryption verification using Web Crypto API
-    // For now, simulate the process
-    addLog(`Testing key: ${key.validation.substring(0, 16)}...`);
+    addLog(`Testing key: ${key.validation.substring(0, 20)}...`);
     
-    await new Promise(resolve => setTimeout(resolve, 50));
-
-    // Placeholder for actual verification logic
-    // const isValid = await verifyMachineKey(viewStateData.value, key, validationAlg.value, decryptionAlg.value, mode.value);
-    // if (isValid) {
-    //   foundKey.value = key;
-    //   addLog(`✅ FOUND! Key: ${key.validation}`);
-    //   break;
-    // }
+    try {
+      const result = await verifyKey(
+        viewStateData.value.trim(),
+        key.validation,
+        key.decryption,
+        generator.value.trim(),
+        decryptionAlg.value,
+        validationAlg.value,
+        mode.value
+      );
+      
+      if (result.success) {
+        foundKey.value = key;
+        if (result.decrypted) {
+          decryptedData.value = bytesToHex(result.decrypted);
+        }
+        addLog(`✅ FOUND! Key: ${key.validation}`);
+        break;
+      }
+    } catch (error) {
+      addLog(`⚠️ Error testing key: ${error}`);
+    }
+    
+    if (i % 10 === 0) {
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
   }
 
   isRunning.value = false;
@@ -186,6 +532,7 @@ function clear() {
   validationKey.value = '';
   decryptionKey.value = '';
   foundKey.value = null;
+  decryptedData.value = null;
   testedKeys.value = 0;
   totalKeys.value = 0;
   finished.value = false;
@@ -212,7 +559,6 @@ function copyLogs() {
 }
 
 onMounted(() => {
-  // Pre-load default keys
   keyWordlist.value = knownKeys;
 });
 </script>
@@ -238,7 +584,7 @@ onMounted(() => {
 
           <div class="grid grid-cols-2 gap-4">
             <div>
-              <label class="block text-sm text-surface-400 mb-2">__VIEWSTATEGENERATOR (optional)</label>
+              <label class="block text-sm text-surface-400 mb-2">__VIEWSTATEGENERATOR (for MAC validation)</label>
               <InputText
                 v-model="generator"
                 class="w-full font-mono text-sm"
@@ -327,11 +673,11 @@ onMounted(() => {
             />
           </div>
           <div>
-            <label class="block text-sm text-surface-400 mb-2">Decryption Key (hex, optional)</label>
+            <label class="block text-sm text-surface-400 mb-2">Decryption Key (hex)</label>
             <InputText
               v-model="decryptionKey"
               class="w-full font-mono text-sm"
-              placeholder="e.g., 21F090935F6E49C2"
+              placeholder="e.g., 21F090935F6E49C2C8B0A1E9F7D6C5B4A3029180F7E6D5C4B3A20190F8E7D6C5"
             />
           </div>
         </div>
@@ -393,6 +739,10 @@ CB2721ABDAF8E9DC516D621D8B8BF13A2C9E8689A25303BF,21F090935F6E49C2
           <span class="text-sm text-surface-400">Decryption Key:</span>
           <code class="block p-2 mt-1 bg-surface-900 rounded text-green-400 font-mono text-xs break-all">{{ foundKey.decryption }}</code>
         </div>
+        <div v-if="decryptedData">
+          <span class="text-sm text-surface-400">Decrypted Data (hex):</span>
+          <code class="block p-2 mt-1 bg-surface-900 rounded text-blue-400 font-mono text-xs break-all max-h-32 overflow-auto">{{ decryptedData }}</code>
+        </div>
       </div>
       <Button :label="copied ? 'Copied!' : 'Copy Keys'" size="small" class="mt-3" @click="copyKey" />
     </div>
@@ -400,7 +750,8 @@ CB2721ABDAF8E9DC516D621D8B8BF13A2C9E8689A25303BF,21F090935F6E49C2
     <!-- Result: Not Found -->
     <div v-else-if="finished && !foundKey" class="p-4 bg-yellow-500/20 border border-yellow-500 rounded-md">
       <h3 class="text-lg font-semibold text-yellow-400">❌ No Matching Key Found</h3>
-      <p class="text-sm text-yellow-300 mt-1">None of the tested keys matched the ViewState signature.</p>
+      <p class="text-sm text-yellow-300 mt-1">None of the tested keys matched the ViewState.</p>
+      <p class="text-xs text-yellow-200 mt-2">Tips: Try different algorithms or check if the ViewState is encrypted/signed.</p>
     </div>
 
     <!-- Logs -->
@@ -419,15 +770,15 @@ CB2721ABDAF8E9DC516D621D8B8BF13A2C9E8689A25303BF,21F090935F6E49C2
       <div class="text-6xl mb-4">🔐</div>
       <h3 class="text-lg font-medium text-surface-300 mb-2">ASP.NET Machine Key Bruteforce</h3>
       <p class="text-sm text-surface-500 max-w-lg mx-auto mb-4">
-        Test known ASP.NET machine keys against a signed ViewState to find the validation/decryption keys.
+        Test known ASP.NET machine keys against a signed/encrypted ViewState.
         Based on the <a href="https://github.com/NotSoSecure/Blacklist3r" target="_blank" class="text-blue-400 hover:underline">Blacklist3r</a> project.
       </p>
       <div class="p-3 bg-surface-800 rounded inline-block text-left">
-        <p class="text-xs text-surface-400 mb-2">⚠️ Requirements:</p>
+        <p class="text-xs text-surface-400 mb-2">💡 Modes:</p>
         <ul class="text-xs text-surface-500 list-disc list-inside">
-          <li>ViewState must be signed (MAC enabled)</li>
-          <li>Key must be in the wordlist</li>
-          <li>Correct algorithm must be selected</li>
+          <li><strong>Validate MAC:</strong> For signed ViewState only</li>
+          <li><strong>Decrypt:</strong> For encrypted ViewState only</li>
+          <li><strong>Both:</strong> For encrypted AND signed ViewState</li>
         </ul>
       </div>
     </div>
