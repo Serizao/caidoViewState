@@ -11,67 +11,72 @@
     </div>
 
     <!-- ViewState Analysis Results -->
-    <div v-if="viewStateDetected && analysis" class="analysis-results">
+    <div v-if="viewStateDetected && parseResult" class="analysis-results">
       <div class="result-card p-4 mb-4 bg-gray-800 rounded border border-gray-700">
         <h3 class="text-md font-semibold mb-3">Analysis Results</h3>
 
         <div class="grid grid-cols-2 gap-4 mb-4">
           <div class="status-item">
             <span class="label text-gray-400">Encrypted:</span>
-            <span :class="analysis.isEncrypted ? 'text-yellow-400 font-semibold' : 'text-gray-500'">
-              {{ analysis.isEncrypted ? 'YES' : 'NO' }}
+            <span :class="parseResult.encrypted ? 'text-red-400 font-semibold' : 'text-green-400 font-semibold'">
+              {{ parseResult.encrypted ? 'YES' : 'NO' }}
             </span>
           </div>
 
           <div class="status-item">
             <span class="label text-gray-400">Signed (MAC):</span>
-            <span :class="analysis.isSigned ? 'text-yellow-400 font-semibold' : 'text-gray-500'">
-              {{ analysis.isSigned ? 'YES' : 'NO' }}
-              <span v-if="analysis.isSigned && analysis.details?.macType" class="text-xs text-gray-400 ml-1">
-                ({{ analysis.details.macType }})
+            <span :class="parseResult.mac ? 'text-green-400 font-semibold' : 'text-red-400 font-semibold'">
+              {{ parseResult.mac ? 'YES' : 'NO' }}
+              <span v-if="parseResult.mac && parseResult.macAlgorithm" class="text-xs text-gray-400 ml-1">
+                ({{ parseResult.macAlgorithm }})
               </span>
             </span>
           </div>
         </div>
 
-        <div class="details p-3 bg-gray-900 rounded">
-          <p class="text-sm mb-2"><span class="text-gray-400">Valid:</span> {{ analysis.isValid ? 'Yes' : 'No' }}</p>
-          <p class="text-sm mb-2"><span class="text-gray-400">.NET Version:</span> {{ analysis.details?.dotNetVersion || 'Unknown' }}</p>
-          <p class="text-sm mb-2"><span class="text-gray-400">Compressed:</span> {{ analysis.details?.isCompressed ? 'Yes' : 'No' }}</p>
-          <p class="text-sm mb-2"><span class="text-gray-400">Size:</span> {{ viewStateValue.length }} chars ({{ analysis.decoded?.length || 0 }} bytes decoded)</p>
-          <p v-if="analysis.error" class="text-sm text-red-400"><span class="text-gray-400">Error:</span> {{ analysis.error }}</p>
-        </div>
-
-        <!-- Detected Controls -->
-        <div v-if="analysis.details?.controlTree && analysis.details.controlTree.length > 0" class="mt-3 p-3 bg-gray-900 rounded">
-          <h4 class="text-sm font-semibold text-blue-400 mb-2">Detected Controls</h4>
-          <div class="text-xs space-y-1">
-            <p v-for="(control, index) in analysis.details.controlTree" :key="index" class="text-green-400">
-              └─ {{ control }}
-            </p>
-          </div>
-        </div>
-
-        <!-- Technical Metrics -->
-        <details class="mt-3">
-          <summary class="cursor-pointer text-sm text-gray-400 hover:text-gray-300">
-            <span>Show technical metrics</span>
+        <!-- MAC Digest (collapsible) -->
+        <details v-if="parseResult.mac && parseResult.digest" class="collapsible-section mb-3">
+          <summary class="cursor-pointer p-2 bg-gray-900 rounded flex items-center gap-2 hover:bg-gray-850">
+            <span class="arrow">▶</span>
+            <span class="text-sm text-gray-300">MAC Digest</span>
           </summary>
-          <div class="mt-2 p-3 bg-gray-900 rounded text-xs space-y-1">
-            <p><span class="text-gray-400">Overall Entropy:</span> {{ analysis.details?.entropy?.toFixed(3) || 'N/A' }}</p>
-            <p><span class="text-gray-400">Last 32 bytes entropy:</span> {{ analysis.details?.entropy32?.toFixed(3) || 'N/A' }}</p>
-            <p><span class="text-gray-400">Last 20 bytes entropy:</span> {{ analysis.details?.entropy20?.toFixed(3) || 'N/A' }}</p>
-            <p><span class="text-gray-400">Plaintext markers:</span> {{ analysis.details?.hasPlaintextMarkers ? 'Yes' : 'No' }}</p>
-            <p><span class="text-gray-400">Readable strings:</span> {{ analysis.details?.hasReadableStrings ? 'Yes' : 'No' }}</p>
-            <p><span class="text-gray-400">Null byte ratio:</span> {{ analysis.details?.nullByteRatio?.toFixed(3) || 'N/A' }}</p>
+          <div class="p-3 bg-gray-900 rounded-b border-t border-gray-700">
+            <code class="text-xs text-orange-400 break-all select-text">{{ parseResult.digest }}</code>
           </div>
         </details>
+
+        <div class="details p-3 bg-gray-900 rounded">
+          <p class="text-sm mb-2"><span class="text-gray-400">Size:</span> {{ viewStateValue.length }} chars</p>
+        </div>
       </div>
 
-      <!-- ViewState Value -->
-      <details class="viewstate-details mb-4">
-        <summary class="cursor-pointer p-3 bg-gray-800 rounded hover:bg-gray-750 flex items-center justify-between">
-          <span class="font-semibold">ViewState Value</span>
+      <!-- Parsed JSON Structure (collapsible) -->
+      <details v-if="!parseResult.encrypted" class="collapsible-section mb-4" open>
+        <summary class="cursor-pointer p-3 bg-gray-800 rounded flex items-center justify-between hover:bg-gray-750">
+          <div class="flex items-center gap-2">
+            <span class="arrow">▶</span>
+            <span class="font-semibold text-blue-400">Parsed ViewState Structure</span>
+          </div>
+          <button
+            @click.stop="copyToClipboard(jsonString)"
+            class="ml-2 px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded transition-colors"
+            title="Copy JSON to clipboard"
+          >
+            {{ copiedJson ? 'Copied!' : 'Copy JSON' }}
+          </button>
+        </summary>
+        <div class="p-3 bg-gray-900 rounded-b border border-gray-700 border-t-0 max-h-96 overflow-y-auto">
+          <pre class="text-xs whitespace-pre-wrap break-all select-text font-mono text-green-400">{{ jsonString }}</pre>
+        </div>
+      </details>
+
+      <!-- ViewState Value (collapsible) -->
+      <details class="collapsible-section mb-4">
+        <summary class="cursor-pointer p-3 bg-gray-800 rounded flex items-center justify-between hover:bg-gray-750">
+          <div class="flex items-center gap-2">
+            <span class="arrow">▶</span>
+            <span class="font-semibold">Raw ViewState Value</span>
+          </div>
           <button
             @click.stop="copyToClipboard(viewStateValue)"
             class="ml-2 px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded transition-colors"
@@ -85,15 +90,21 @@
         </div>
       </details>
 
-      <!-- Decoded ViewState (if available) -->
-      <details v-if="analysis.decoded" class="viewstate-details mb-4">
-        <summary class="cursor-pointer p-3 bg-gray-800 rounded hover:bg-gray-750">
-          <span class="font-semibold">Decoded ViewState (Binary)</span>
+      <!-- Hex Dump (collapsible) -->
+      <details class="collapsible-section mb-4">
+        <summary class="cursor-pointer p-3 bg-gray-800 rounded flex items-center gap-2 hover:bg-gray-750">
+          <span class="arrow">▶</span>
+          <span class="font-semibold">Hex Dump (Binary)</span>
         </summary>
         <div class="p-3 bg-gray-900 rounded-b border border-gray-700 border-t-0 max-h-64 overflow-y-auto">
           <pre class="text-xs whitespace-pre-wrap break-all select-text font-mono">{{ hexDump }}</pre>
         </div>
       </details>
+
+      <!-- Error display -->
+      <div v-if="parseError" class="p-3 bg-red-900 border border-red-700 rounded">
+        <p class="text-red-100"><span class="font-semibold">Parse Error:</span> {{ parseError }}</p>
+      </div>
     </div>
   </div>
 </template>
@@ -101,7 +112,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue';
 import type { API, RequestFull } from '@caido/sdk-frontend';
-import { ViewStateParser } from './viewstate-parser';
+import { parseViewState, extractViewState, decodeViewState, type ViewStateParseResult } from './lib/viewstate-module';
 
 const props = defineProps<{
   sdk: API;
@@ -110,45 +121,56 @@ const props = defineProps<{
 
 const currentRequest = ref<RequestFull | null>(null);
 const viewStateValue = ref<string>('');
-const analysis = ref<any>(null);
+const parseResult = ref<ViewStateParseResult | null>(null);
+const parseError = ref<string>('');
 const copied = ref<boolean>(false);
+const copiedJson = ref<boolean>(false);
 
 const viewStateDetected = computed(() => viewStateValue.value.length > 0);
 
+const jsonString = computed(() => {
+  if (!parseResult.value?.json) return '';
+  return JSON.stringify(parseResult.value.json, null, 2);
+});
+
 const hexDump = computed(() => {
-  if (!analysis.value?.decoded) return '';
+  if (!viewStateValue.value) return '';
 
-  const decoded = analysis.value.decoded;
-  let result = '';
-  const bytesPerLine = 16;
+  try {
+    const decoded = decodeViewState(viewStateValue.value);
+    let result = '';
+    const bytesPerLine = 16;
 
-  for (let i = 0; i < decoded.length; i += bytesPerLine) {
-    // Offset
-    result += i.toString(16).padStart(8, '0') + '  ';
+    for (let i = 0; i < decoded.length; i += bytesPerLine) {
+      // Offset
+      result += i.toString(16).padStart(8, '0') + '  ';
 
-    // Hex bytes
-    for (let j = 0; j < bytesPerLine; j++) {
-      if (i + j < decoded.length) {
-        const byte = decoded.charCodeAt(i + j);
-        result += byte.toString(16).padStart(2, '0') + ' ';
-      } else {
-        result += '   ';
+      // Hex bytes
+      for (let j = 0; j < bytesPerLine; j++) {
+        if (i + j < decoded.length) {
+          const byte = decoded[i + j];
+          result += byte.toString(16).padStart(2, '0') + ' ';
+        } else {
+          result += '   ';
+        }
+        if (j === 7) result += ' ';
       }
-      if (j === 7) result += ' ';
+
+      result += ' ';
+
+      // ASCII representation
+      for (let j = 0; j < bytesPerLine && i + j < decoded.length; j++) {
+        const byte = decoded[i + j];
+        result += (byte >= 32 && byte <= 126) ? String.fromCharCode(byte) : '.';
+      }
+
+      result += '\n';
     }
 
-    result += ' ';
-
-    // ASCII representation
-    for (let j = 0; j < bytesPerLine && i + j < decoded.length; j++) {
-      const byte = decoded.charCodeAt(i + j);
-      result += (byte >= 32 && byte <= 126) ? decoded.charAt(i + j) : '.';
-    }
-
-    result += '\n';
+    return result;
+  } catch {
+    return 'Unable to decode ViewState';
   }
-
-  return result;
 });
 
 onMounted(() => {
@@ -164,26 +186,35 @@ function analyzeRequest() {
   const rawRequest = currentRequest.value.raw;
 
   // Extract ViewState from the request body
-  const viewStates = ViewStateParser.extractViewState(rawRequest);
+  const viewStates = extractViewState(rawRequest);
 
   if (viewStates.length > 0) {
     viewStateValue.value = viewStates[0];
 
     try {
-      analysis.value = ViewStateParser.analyze(viewStateValue.value);
-      console.log('[ViewState] Analysis:', analysis.value);
+      parseResult.value = parseViewState(viewStateValue.value);
+      parseError.value = '';
+      console.log('[ViewState] Parse result:', parseResult.value);
     } catch (error) {
-      console.error('[ViewState] Failed to analyze:', error);
+      console.error('[ViewState] Failed to parse:', error);
+      parseError.value = error instanceof Error ? error.message : 'Unknown error';
     }
   }
 }
 
 function copyToClipboard(text: string) {
   navigator.clipboard.writeText(text).then(() => {
-    copied.value = true;
-    setTimeout(() => {
-      copied.value = false;
-    }, 2000);
+    if (text === viewStateValue.value) {
+      copied.value = true;
+      setTimeout(() => {
+        copied.value = false;
+      }, 2000);
+    } else {
+      copiedJson.value = true;
+      setTimeout(() => {
+        copiedJson.value = false;
+      }, 2000);
+    }
   }).catch(err => {
     console.error('[ViewState] Failed to copy to clipboard:', err);
   });
@@ -203,12 +234,34 @@ code {
   font-size: 0.9em;
 }
 
-summary {
+/* Collapsible sections with arrow */
+.collapsible-section summary {
   user-select: none;
+  list-style: none;
 }
 
-details[open] summary {
-  margin-bottom: 0.5rem;
+.collapsible-section summary::-webkit-details-marker {
+  display: none;
+}
+
+.collapsible-section summary::marker {
+  display: none;
+}
+
+.collapsible-section .arrow {
+  display: inline-block;
+  font-size: 0.7em;
+  transition: transform 0.2s ease;
+  color: #9ca3af;
+}
+
+.collapsible-section[open] .arrow {
+  transform: rotate(90deg);
+}
+
+.collapsible-section[open] summary {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
 }
 
 /* Enable text selection */
