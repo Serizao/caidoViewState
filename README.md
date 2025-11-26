@@ -64,3 +64,10 @@ MIT
 ## Author
 
 Serizao - [GitHub](https://github.com/serizao)
+
+
+## Thank's
+
+Thank's for the work:
+- https://www.claranet.com/us/blog/2019-06-13-exploiting-viewstate-deserialization-using-blacklist3r-and-ysoserialnet
+- https://github.com/NotSoSecure/Blacklist3r
